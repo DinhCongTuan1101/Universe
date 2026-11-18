@@ -1,0 +1,932 @@
+// =====================================================================
+// UniVerse – Prisma schema (MySQL 8.x)
+// Quy ước: id Int tự tăng, createdAt/updatedAt, deletedAt = soft delete.
+// Mọi truy vấn dữ liệu cá nhân đều lọc theo userId ở tầng service.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------- AUTH / USERS -----------------------------
+
+enum Role {
+  STUDENT
+  MODERATOR
+  ADMIN
+}
+
+model User {
+  id                   Int       @id @default(autoincrement())
+  email                String    @unique @db.VarChar(191)
+  passwordHash         String    @db.VarChar(100)
+  fullName             String    @db.VarChar(120)
+  role                 Role      @default(STUDENT)
+  avatarPath           String?   @db.VarChar(191)
+  university           String?   @db.VarChar(191)
+  major                String?   @db.VarChar(191)
+  className            String?   @db.VarChar(60)
+  studentCode          String?   @db.VarChar(40)
+  bio                  String?   @db.VarChar(500)
+  theme                String    @default("system") @db.VarChar(10)
+  notificationSettings Json?
+  storageQuota         BigInt    @default(1073741824)
+  isActive             Boolean   @default(true)
+  isDemo               Boolean   @default(false)
+  lastLoginAt          DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  userSessions    UserSession[]
+  semesters       Semester[]
+  subjects        Subject[]
+  classMeetings   ClassMeeting[]
+  scheduleImports ScheduleImport[]
+  folders         Folder[]
+  files           DriveFile[]
+  tags            Tag[]
+  documentChunks  DocumentChunk[]
+  notes           Note[]
+  workbooks       Workbook[]
+  tasks           Task[]           @relation("TaskOwner")
+  assignedTasks   Task[]           @relation("TaskAssignee")
+  conversations   AiConversation[]
+  aiUsage         AiUsage[]
+  quizSets        QuizSet[]
+  quizAttempts    QuizAttempt[]
+  ownedGroups     Group[]
+  groupMembers    GroupMember[]
+  invitesSent     GroupInvite[]    @relation("InviteSender")
+  invitesReceived GroupInvite[]    @relation("InviteReceiver")
+  groupResources  GroupResource[]
+  posts           Post[]
+  comments        Comment[]
+  ratings         PostRating[]
+  reports         Report[]         @relation("ReportReporter")
+  reportsHandled  Report[]         @relation("ReportHandler")
+  notifications   Notification[]
+  favorites       Favorite[]
+  recentViews     RecentView[]
+  activityLogs    ActivityLog[]
+}
+
+// Bảng do express-mysql-session sử dụng (tên cột theo chuẩn của thư viện)
+model Session {
+  session_id String  @id @db.VarChar(128)
+  expires    Int     @db.UnsignedInt
+  data       String? @db.MediumText
+
+  @@index([expires])
+  @@map("sessions")
+}
+
+// Thông tin phiên đăng nhập để người dùng xem/thu hồi thiết bị
+model UserSession {
+  id         Int      @id @default(autoincrement())
+  sid        String   @unique @db.VarChar(128)
+  userId     Int
+  userAgent  String?  @db.VarChar(255)
+  ip         String?  @db.VarChar(64)
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ----------------------------- UNISCHEDULE -----------------------------
+
+model Semester {
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  name         String    @db.VarChar(120)
+  academicYear String?   @db.VarChar(20)
+  term         String?   @db.VarChar(20)
+  phase        String?   @db.VarChar(20)
+  startDate    DateTime? @db.Date
+  endDate      DateTime? @db.Date
+  isCurrent    Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subjects Subject[]
+  imports  ScheduleImport[]
+
+  @@index([userId, deletedAt])
+}
+
+model Subject {
+  id         Int       @id @default(autoincrement())
+  userId     Int
+  semesterId Int?
+  importId   Int?
+  code       String?   @db.VarChar(40)
+  name       String    @db.VarChar(191)
+  credits    Int?
+  classCode  String?   @db.VarChar(120)
+  lecturer   String?   @db.VarChar(120)
+  color      String    @default("#2563EB") @db.VarChar(9)
+  note       String?   @db.Text
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  semester  Semester?        @relation(fields: [semesterId], references: [id], onDelete: SetNull)
+  import    ScheduleImport?  @relation(fields: [importId], references: [id], onDelete: SetNull)
+  periods   SchedulePeriod[]
+  meetings  ClassMeeting[]
+  files     DriveFile[]
+  notes     Note[]
+  workbooks Workbook[]
+  tasks     Task[]
+  quizSets  QuizSet[]
+
+  @@index([userId, deletedAt])
+  @@index([semesterId])
+}
+
+// Một khoảng ngày học của môn (vd: Từ 10/08/2026 đến 23/08/2026)
+model SchedulePeriod {
+  id         Int      @id @default(autoincrement())
+  subjectId  Int
+  startDate  DateTime @db.Date
+  endDate    DateTime @db.Date
+  rawText    String?  @db.Text
+  orderIndex Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  subject  Subject        @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  sessions ClassSession[]
+
+  @@index([subjectId])
+}
+
+// Mẫu buổi học lặp theo thứ trong một khoảng ngày (vd: Thứ 3 tiết 1,2,3 tại 604-TA1)
+model ClassSession {
+  id          Int      @id @default(autoincrement())
+  periodId    Int
+  dayOfWeek   Int // ISO: 1 = Thứ 2 ... 6 = Thứ 7, 7 = Chủ nhật
+  startPeriod Int
+  endPeriod   Int
+  periods     String   @db.VarChar(60) // danh sách tiết gốc "1,2,3"
+  room        String?  @db.VarChar(80)
+  location    String?  @db.VarChar(191)
+  lecturer    String?  @db.VarChar(120)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  period   SchedulePeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  meetings ClassMeeting[]
+
+  @@index([periodId])
+}
+
+enum MeetingStatus {
+  SCHEDULED
+  CANCELLED
+}
+
+// Buổi học cụ thể theo ngày, sinh ra từ ClassSession trong phạm vi SchedulePeriod
+model ClassMeeting {
+  id          Int           @id @default(autoincrement())
+  userId      Int
+  subjectId   Int
+  sessionId   Int
+  date        DateTime      @db.Date
+  startPeriod Int
+  endPeriod   Int
+  room        String?       @db.VarChar(80)
+  status      MeetingStatus @default(SCHEDULED)
+  note        String?       @db.Text
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject Subject      @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  session ClassSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tasks   Task[]
+
+  @@unique([sessionId, date])
+  @@index([userId, date])
+  @@index([subjectId])
+}
+
+enum Shift {
+  MORNING
+  AFTERNOON
+  EVENING
+}
+
+// Cấu hình tiết học (quản trị viên chỉnh). Giờ có thể để trống khi chưa có bảng giờ chính thức.
+model ClassPeriod {
+  id           Int      @id @default(autoincrement())
+  periodNumber Int      @unique
+  shift        Shift
+  startTime    String?  @db.VarChar(5) // "07:00"
+  endTime      String?  @db.VarChar(5)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+enum ImportStatus {
+  PREVIEW
+  CONFIRMED
+  CANCELLED
+}
+
+model ScheduleImport {
+  id          Int          @id @default(autoincrement())
+  userId      Int
+  semesterId  Int?
+  adapter     String       @db.VarChar(40)
+  fileName    String       @db.VarChar(255)
+  status      ImportStatus @default(PREVIEW)
+  previewData Json
+  createdAt   DateTime     @default(now())
+  confirmedAt DateTime?
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  semester Semester? @relation(fields: [semesterId], references: [id], onDelete: SetNull)
+  subjects Subject[]
+
+  @@index([userId, status])
+}
+
+// ----------------------------- UNIDRIVE -----------------------------
+
+model Folder {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  parentId  Int?
+  name      String    @db.VarChar(191)
+  color     String?   @db.VarChar(9)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent   Folder?     @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children Folder[]    @relation("FolderTree")
+  files    DriveFile[]
+
+  @@index([userId, parentId, deletedAt])
+}
+
+enum DocStatus {
+  NONE
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+model DriveFile {
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  folderId     Int?
+  subjectId    Int?
+  originalName String    @db.VarChar(255)
+  storedName   String    @unique @db.VarChar(80)
+  mimeType     String    @db.VarChar(120)
+  extension    String    @db.VarChar(12)
+  size         BigInt
+  checksum     String    @db.VarChar(64)
+  description  String?   @db.Text
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folder         Folder?         @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  subject        Subject?        @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  tags           FileTag[]
+  document       Document?
+  groupResources GroupResource[]
+  posts          Post[]
+  quizSets       QuizSet[]
+
+  @@index([userId, folderId, deletedAt])
+  @@index([userId, subjectId])
+}
+
+model Tag {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  name      String   @db.VarChar(40)
+  color     String   @default("#0891B2") @db.VarChar(9)
+  createdAt DateTime @default(now())
+
+  user  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  files FileTag[]
+
+  @@unique([userId, name])
+}
+
+model FileTag {
+  fileId Int
+  tagId  Int
+
+  file DriveFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  tag  Tag       @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([fileId, tagId])
+  @@index([tagId])
+}
+
+// Kết quả trích xuất văn bản của một file (phục vụ tìm kiếm nội dung + RAG)
+model Document {
+  id             Int       @id @default(autoincrement())
+  fileId         Int       @unique
+  status         DocStatus @default(UPLOADED)
+  errorMessage   String?   @db.VarChar(500)
+  charCount      Int       @default(0)
+  pageCount      Int?
+  chunkCount     Int       @default(0)
+  embeddingModel String?   @db.VarChar(80)
+  embeddedCount  Int       @default(0)
+  processedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  file   DriveFile       @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  chunks DocumentChunk[]
+}
+
+model DocumentChunk {
+  id         Int      @id @default(autoincrement())
+  documentId Int
+  userId     Int
+  chunkIndex Int
+  content    String   @db.Text
+  pageNumber Int?
+  charStart  Int
+  charEnd    Int
+  embedding  Json?
+  createdAt  DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, chunkIndex])
+  @@index([userId])
+}
+
+// ----------------------------- UNINOTE -----------------------------
+
+model Note {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  parentId    Int?
+  subjectId   Int?
+  title       String    @default("") @db.VarChar(255)
+  icon        String?   @db.VarChar(16)
+  content     Json // { blocks: [...] }
+  contentText String    @db.MediumText
+  version     Int       @default(1)
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent         Note?           @relation("NoteTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children       Note[]          @relation("NoteTree")
+  subject        Subject?        @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  groupResources GroupResource[]
+  posts          Post[]
+
+  @@index([userId, parentId, deletedAt])
+}
+
+// ----------------------------- UNISHEET -----------------------------
+
+model Workbook {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  subjectId Int?
+  title     String    @db.VarChar(191)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject Subject?    @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  sheets  Worksheet[]
+
+  @@index([userId, deletedAt])
+}
+
+model Worksheet {
+  id         Int      @id @default(autoincrement())
+  workbookId Int
+  name       String   @db.VarChar(60)
+  orderIndex Int      @default(0)
+  rowCount   Int      @default(100)
+  colCount   Int      @default(26)
+  cells      Json // { "A1": { "v": "...", "f": "=SUM(A2:A5)", "s": {...} } }
+  colWidths  Json?
+  rowHeights Json?
+  version    Int      @default(1)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  workbook Workbook @relation(fields: [workbookId], references: [id], onDelete: Cascade)
+
+  @@index([workbookId])
+}
+
+// ----------------------------- UNITASK (+ việc nhóm) -----------------------------
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Task {
+  id             Int        @id @default(autoincrement())
+  userId         Int // người tạo / chủ sở hữu
+  groupId        Int? // != null => nhiệm vụ nhóm
+  assigneeId     Int?
+  parentId       Int?
+  subjectId      Int?
+  classMeetingId Int?
+  title          String     @db.VarChar(255)
+  description    String?    @db.Text
+  status         TaskStatus @default(TODO)
+  priority       Priority   @default(MEDIUM)
+  dueAt          DateTime?
+  remindAt       DateTime?
+  reminderSentAt DateTime?
+  completedAt    DateTime?
+  sortOrder      Int        @default(0)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  deletedAt      DateTime?
+
+  user         User          @relation("TaskOwner", fields: [userId], references: [id], onDelete: Cascade)
+  assignee     User?         @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  group        Group?        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  parent       Task?         @relation("Subtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks     Task[]        @relation("Subtasks")
+  subject      Subject?      @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  classMeeting ClassMeeting? @relation(fields: [classMeetingId], references: [id], onDelete: SetNull)
+
+  @@index([userId, deletedAt, status])
+  @@index([groupId, deletedAt])
+  @@index([assigneeId])
+  @@index([dueAt])
+  @@index([remindAt, reminderSentAt])
+}
+
+// ----------------------------- UNIAI -----------------------------
+
+model AiConversation {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  title       String    @db.VarChar(191)
+  documentIds Json? // danh sách DriveFile.id được đính kèm làm ngữ cảnh
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages AiMessage[]
+
+  @@index([userId, deletedAt])
+}
+
+enum AiRole {
+  USER
+  ASSISTANT
+}
+
+model AiMessage {
+  id             Int      @id @default(autoincrement())
+  conversationId Int
+  role           AiRole
+  content        String   @db.MediumText
+  sources        Json?
+  provider       String?  @db.VarChar(20)
+  model          String?  @db.VarChar(80)
+  createdAt      DateTime @default(now())
+
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+}
+
+model AiUsage {
+  id               Int      @id @default(autoincrement())
+  userId           Int
+  feature          String   @db.VarChar(40)
+  provider         String   @db.VarChar(20)
+  model            String   @db.VarChar(80)
+  promptTokens     Int?
+  completionTokens Int?
+  totalTokens      Int?
+  success          Boolean
+  errorCode        String?  @db.VarChar(60)
+  durationMs       Int
+  createdAt        DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// ----------------------------- UNIQUIZ -----------------------------
+
+enum QuestionType {
+  SINGLE
+  MULTIPLE
+  TRUE_FALSE
+  SHORT
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+model QuizSet {
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  subjectId    Int?
+  sourceFileId Int?
+  title        String    @db.VarChar(191)
+  description  String?   @db.Text
+  chapter      String?   @db.VarChar(120)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject    Subject?      @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  sourceFile DriveFile?    @relation(fields: [sourceFileId], references: [id], onDelete: SetNull)
+  questions  Question[]
+  attempts   QuizAttempt[]
+
+  @@index([userId, deletedAt])
+}
+
+model Question {
+  id            Int          @id @default(autoincrement())
+  quizSetId     Int
+  type          QuestionType
+  content       String       @db.Text
+  options       Json? // [{ id: "a", text: "..." }]
+  correctAnswer Json // SINGLE: "a" | MULTIPLE: ["a","c"] | TRUE_FALSE: true | SHORT: ["đáp án", "đồng nghĩa"]
+  explanation   String?      @db.Text
+  difficulty    Difficulty   @default(MEDIUM)
+  topic         String?      @db.VarChar(120)
+  orderIndex    Int          @default(0)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  quizSet QuizSet      @relation(fields: [quizSetId], references: [id], onDelete: Cascade)
+  answers QuizAnswer[]
+
+  @@index([quizSetId])
+}
+
+enum QuizMode {
+  QUICK
+  PRACTICE
+  MOCK
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+}
+
+model QuizAttempt {
+  id           Int           @id @default(autoincrement())
+  userId       Int
+  quizSetId    Int
+  mode         QuizMode
+  status       AttemptStatus @default(IN_PROGRESS)
+  questionIds  Json
+  timeLimitSec Int?
+  score        Float?
+  correctCount Int?
+  totalCount   Int
+  startedAt    DateTime      @default(now())
+  submittedAt  DateTime?
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quizSet QuizSet      @relation(fields: [quizSetId], references: [id], onDelete: Cascade)
+  answers QuizAnswer[]
+
+  @@index([userId, quizSetId])
+}
+
+model QuizAnswer {
+  id         Int      @id @default(autoincrement())
+  attemptId  Int
+  questionId Int
+  answer     Json?
+  isCorrect  Boolean?
+  answeredAt DateTime @default(now())
+
+  attempt  QuizAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  question Question    @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([attemptId, questionId])
+}
+
+// ----------------------------- UNIGROUP -----------------------------
+
+enum GroupRole {
+  LEADER
+  MEMBER
+}
+
+model Group {
+  id          Int       @id @default(autoincrement())
+  ownerId     Int
+  name        String    @db.VarChar(120)
+  description String?   @db.Text
+  joinCode    String    @unique @db.VarChar(12)
+  color       String    @default("#2563EB") @db.VarChar(9)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  owner     User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  members   GroupMember[]
+  invites   GroupInvite[]
+  resources GroupResource[]
+  tasks     Task[]
+  activity  ActivityLog[]
+}
+
+model GroupMember {
+  id       Int       @id @default(autoincrement())
+  groupId  Int
+  userId   Int
+  role     GroupRole @default(MEMBER)
+  joinedAt DateTime  @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
+model GroupInvite {
+  id        Int          @id @default(autoincrement())
+  groupId   Int
+  inviterId Int
+  inviteeId Int
+  status    InviteStatus @default(PENDING)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  group   Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  inviter User  @relation("InviteSender", fields: [inviterId], references: [id], onDelete: Cascade)
+  invitee User  @relation("InviteReceiver", fields: [inviteeId], references: [id], onDelete: Cascade)
+
+  @@index([inviteeId, status])
+  @@index([groupId])
+}
+
+enum ResourceType {
+  FILE
+  NOTE
+}
+
+model GroupResource {
+  id         Int          @id @default(autoincrement())
+  groupId    Int
+  type       ResourceType
+  fileId     Int?
+  noteId     Int?
+  sharedById Int
+  createdAt  DateTime     @default(now())
+
+  group    Group      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  file     DriveFile? @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  note     Note?      @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  sharedBy User       @relation(fields: [sharedById], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, fileId])
+  @@unique([groupId, noteId])
+}
+
+// ----------------------------- UNISHARE -----------------------------
+
+enum PostType {
+  ARTICLE
+  DOCUMENT
+  NOTE
+  OUTLINE
+  RESOURCE
+}
+
+enum PostStatus {
+  PUBLISHED
+  HIDDEN
+  REMOVED
+}
+
+model Post {
+  id                 Int        @id @default(autoincrement())
+  authorId           Int
+  type               PostType
+  title              String     @db.VarChar(191)
+  content            String     @db.MediumText
+  subjectName        String?    @db.VarChar(191)
+  topic              String?    @db.VarChar(120)
+  fileId             Int?
+  noteId             Int?
+  externalUrl        String?    @db.VarChar(500)
+  license            String?    @db.VarChar(60)
+  copyrightConfirmed Boolean    @default(false)
+  status             PostStatus @default(PUBLISHED)
+  moderationNote     String?    @db.VarChar(500)
+  viewCount          Int        @default(0)
+  ratingAvg          Float      @default(0)
+  ratingCount        Int        @default(0)
+  commentCount       Int        @default(0)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  deletedAt          DateTime?
+
+  author  User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  file    DriveFile?   @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  note    Note?        @relation(fields: [noteId], references: [id], onDelete: SetNull)
+  ratings PostRating[]
+
+  @@index([status, deletedAt, createdAt])
+  @@index([authorId])
+}
+
+model PostRating {
+  id        Int      @id @default(autoincrement())
+  postId    Int
+  userId    Int
+  value     Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+}
+
+enum CommentTarget {
+  POST
+  GROUP
+  TASK
+}
+
+// Bình luận dùng chung (bài viết cộng đồng, nhóm, nhiệm vụ nhóm). Quyền kiểm tra ở service.
+model Comment {
+  id         Int           @id @default(autoincrement())
+  userId     Int
+  targetType CommentTarget
+  targetId   Int
+  content    String        @db.Text
+  hidden     Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  deletedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([targetType, targetId, deletedAt])
+}
+
+enum ReportStatus {
+  OPEN
+  RESOLVED
+  REJECTED
+}
+
+enum ReportTarget {
+  POST
+  COMMENT
+}
+
+model Report {
+  id          Int          @id @default(autoincrement())
+  reporterId  Int
+  targetType  ReportTarget
+  targetId    Int
+  reason      String       @db.VarChar(40)
+  details     String?      @db.Text
+  status      ReportStatus @default(OPEN)
+  handledById Int?
+  handledAt   DateTime?
+  resolution  String?      @db.VarChar(500)
+  createdAt   DateTime     @default(now())
+
+  reporter  User  @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  handledBy User? @relation("ReportHandler", fields: [handledById], references: [id], onDelete: SetNull)
+
+  @@unique([reporterId, targetType, targetId])
+  @@index([status])
+}
+
+// ----------------------------- HỆ THỐNG CHUNG -----------------------------
+
+model Notification {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  type      String    @db.VarChar(40)
+  title     String    @db.VarChar(191)
+  body      String?   @db.VarChar(500)
+  link      String?   @db.VarChar(255)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+enum EntityType {
+  FILE
+  FOLDER
+  NOTE
+  WORKBOOK
+  TASK
+  QUIZ_SET
+  GROUP
+  POST
+  SUBJECT
+  CONVERSATION
+}
+
+model Favorite {
+  id         Int        @id @default(autoincrement())
+  userId     Int
+  entityType EntityType
+  entityId   Int
+  createdAt  DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, entityType, entityId])
+}
+
+model RecentView {
+  id         Int        @id @default(autoincrement())
+  userId     Int
+  entityType EntityType
+  entityId   Int
+  viewedAt   DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, entityType, entityId])
+  @@index([userId, viewedAt])
+}
+
+model ActivityLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  groupId    Int?
+  action     String   @db.VarChar(60)
+  entityType String?  @db.VarChar(30)
+  entityId   Int?
+  summary    String   @db.VarChar(255)
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group Group? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([groupId, createdAt])
+}

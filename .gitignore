@@ -1,0 +1,16 @@
+node_modules/
+.env
+.env.*
+!.env.example
+storage/uploads/*
+!storage/uploads/.gitkeep
+storage/avatars/*
+!storage/avatars/.gitkeep
+logs/
+*.log
+# File thời khóa biểu thật chứa thông tin cá nhân - không commit
+tests/fixtures/kma/*
+!tests/fixtures/kma/README.md
+coverage/
+.DS_Store
+Thumbs.db
